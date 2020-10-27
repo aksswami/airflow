@@ -22,7 +22,10 @@ import socket
 from datetime import timedelta
 from typing import Any
 
+import flask
+import flask_login
 import six
+import pendulum
 from flask import Flask, session as flask_session
 from flask_appbuilder import AppBuilder, SQLA
 from flask_caching import Cache
@@ -34,6 +37,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from airflow import settings, version
 from airflow.configuration import conf
 from airflow.logging_config import configure_logging
+from airflow.settings import STATE_COLORS
 from airflow.www_rbac.static_config import configure_manifest_files
 
 app = None  # type: Any
@@ -103,7 +107,8 @@ def create_app(config=None, session=None, testing=False, app_name="Airflow"):
             app,
             db.session if not session else session,
             security_manager_class=security_manager_class,
-            base_template='appbuilder/baselayout.html')
+            base_template='airflow/master.html',
+            update_perms=conf.getboolean('webserver', 'UPDATE_FAB_PERMS'))
 
         def init_views(appbuilder):
             from airflow.www_rbac import views
@@ -127,6 +132,9 @@ def create_app(config=None, session=None, testing=False, app_name="Airflow"):
                                 category="Browse")
             appbuilder.add_view(views.TaskInstanceModelView,
                                 "Task Instances",
+                                category="Browse")
+            appbuilder.add_view(views.TaskRescheduleModelView,
+                                "Task Reschedules",
                                 category="Browse")
             appbuilder.add_view(views.ConfigurationView,
                                 "Configurations",
@@ -212,10 +220,26 @@ def create_app(config=None, session=None, testing=False, app_name="Airflow"):
 
         app.register_blueprint(e.api_experimental, url_prefix='/api/experimental')
 
+        server_timezone = conf.get('core', 'default_timezone')
+        if server_timezone == "system":
+            server_timezone = pendulum.local_timezone().name
+        elif server_timezone == "utc":
+            server_timezone = "UTC"
+
+        default_ui_timezone = conf.get('webserver', 'default_ui_timezone')
+        if default_ui_timezone == "system":
+            default_ui_timezone = pendulum.local_timezone().name
+        elif default_ui_timezone == "utc":
+            default_ui_timezone = "UTC"
+        if not default_ui_timezone:
+            default_ui_timezone = server_timezone
+
         @app.context_processor
         def jinja_globals():  # pylint: disable=unused-variable
 
             globals = {
+                'server_timezone': server_timezone,
+                'default_ui_timezone': default_ui_timezone,
                 'hostname': socket.getfqdn() if conf.getboolean(
                     'webserver', 'EXPOSE_HOSTNAME', fallback=True) else 'redact',
                 'navbar_color': conf.get('webserver', 'NAVBAR_COLOR'),
@@ -224,7 +248,8 @@ def create_app(config=None, session=None, testing=False, app_name="Airflow"):
                 'log_auto_tailing_offset': conf.getint(
                     'webserver', 'log_auto_tailing_offset', fallback=30),
                 'log_animation_speed': conf.getint(
-                    'webserver', 'log_animation_speed', fallback=1000)
+                    'webserver', 'log_animation_speed', fallback=1000),
+                'state_color_mapping': STATE_COLORS
             }
 
             if 'analytics_tool' in conf.getsection('webserver'):
@@ -244,7 +269,7 @@ def create_app(config=None, session=None, testing=False, app_name="Airflow"):
             _force_log_out_after = conf.getint('webserver', 'FORCE_LOG_OUT_AFTER', fallback=0)
             if _force_log_out_after > 0:
                 flask.session.permanent = True
-                app.permanent_session_lifetime = datetime.timedelta(minutes=_force_log_out_after)
+                app.permanent_session_lifetime = timedelta(minutes=_force_log_out_after)
                 flask.session.modified = True
                 flask.g.user = flask_login.current_user
 
